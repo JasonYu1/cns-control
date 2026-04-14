@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "cns_control"
 dynamic = ["version"]
-description = ''
+description = 'CNS control software for spontaneous Raman microspectroscopy'
 readme = "README.md"
 requires-python = ">=3.8"
-license = "MIT"
+license = "BSD-3-Clause"
 keywords = []
 authors = [
-  { name = "U.N. Owen", email = "void@some.where" },
+  { name = "Jason Yu", email = "your-actual-email@example.com" },
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -27,9 +27,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Documentation = "https://github.com/U.N. Owen/cns-control#readme"
-Issues = "https://github.com/U.N. Owen/cns-control/issues"
-Source = "https://github.com/U.N. Owen/cns-control"
+Documentation = "https://github.com/JasonYu1/cns_control#readme"
+Issues = "https://github.com/JasonYu1/cns_control/issues"
+Source = "https://github.com/JasonYu1/cns_control"
 
 [tool.hatch.version]
 path = "src/cns_control/__about__.py"
