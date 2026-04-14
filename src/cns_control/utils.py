@@ -1,0 +1,362 @@
+import numpy as np
+import napari
+from skimage.draw import disk
+from napari_broadcastable_points import BroadcastablePoints
+from raman_mda_engine.aiming import PointsLayerSource
+from raman_mda_engine.utils import get_seq_from_napari
+from scipy.ndimage import center_of_mass
+from tqdm.auto import tqdm
+import time
+from raman_mda_engine.aiming.autotracking import segment_single_img
+from scipy.ndimage import distance_transform_edt
+
+import numpy as np
+from skimage.draw import disk
+
+def add_mask_with_hole(
+    viewer,
+    image_size,
+    circle_radius=200,
+    color=(255, 0, 0),
+    alpha=50,
+    circle_center=None,
+    small_circle_radius=10,
+    small_circle_color=(0, 255, 0),
+    small_circle_alpha=255
+):
+    """
+    Adds a semi-transparent colored mask with a transparent circular hole and a solid
+    colored small circle (dot) in the center to a napari viewer.
+
+    Parameters:
+    -----------
+    viewer : napari.Viewer
+        The napari viewer instance.
+    image_size : tuple
+        The (height, width) of the image.
+    circle_radius : int
+        Radius of the main transparent hole.
+    color : tuple
+        RGB color of the main mask.
+    alpha : int
+        Transparency of the main mask (0-255).
+    circle_center : tuple or None
+        (y, x) center of both holes. Defaults to image center.
+    small_circle_radius : int
+        Radius of the small central dot.
+    small_circle_color : tuple
+        RGB color of the small dot.
+    small_circle_alpha : int
+        Alpha for the small dot (default fully opaque).
+    """
+
+    image_size = tuple(image_size)
+    rgba_image = np.zeros((image_size[0], image_size[1], 4), dtype=np.uint8)
+
+    # Fill with the main mask color and alpha
+    rgba_image[:, :, :3] = color
+    rgba_image[:, :, 3] = alpha
+
+    # Set center
+    if circle_center is None:
+        circle_center = (image_size[0] / 2, image_size[1] / 2)
+
+    # Transparent main circular hole
+    rr_main, cc_main = disk(circle_center, circle_radius, shape=rgba_image.shape[:2])
+    rgba_image[rr_main, cc_main, :] = 0
+
+    # Solid small colored circle in the center
+    rr_small, cc_small = disk(circle_center, small_circle_radius, shape=rgba_image.shape[:2])
+    rgba_image[rr_small, cc_small, :3] = small_circle_color
+    rgba_image[rr_small, cc_small, 3] = small_circle_alpha
+
+    # Add to napari
+    viewer.add_image(rgba_image, rgb=True)
+
+def create_point_sources(viewer, 
+                         point_transformer, 
+                         broadcast_dims=(0, 2, 3),
+                         ndim=6,
+                         size=35,
+                         names=['cells', 'autofocus'], 
+                         colors=['#aa0000ff', 'springgreen']):
+    """
+    Creates and adds multiple point source layers to a Napari viewer.
+
+    Parameters:
+    -----------
+    viewer : napari.Viewer
+        The Napari viewer where the point sources will be added.
+    point_transformer : callable
+        A transformation function applied to the point coordinates.
+    broadcast_dims : tuple, optional
+        Dimensions along which the points should be broadcasted (default: (0, 2, 3)).
+    ndim : int, optional
+        Number of dimensions for the point sources (default: 6).
+    size : float, optional
+        Size of the points in pixels (default: 35).
+    names : list of str, optional
+        Names of the point source layers (default: ['cells', 'bkd', 'beads']).
+    colors : list of str, optional
+        List of colors for the point sources, specified in hex format (default: ['#aa0000ff', '#2d1f7f', 'springgreen']).
+
+    Returns:
+    --------
+    list of PointsLayerSource
+        A list of `PointsLayerSource` objects, each corresponding to a created point layer.
+    """
+    sources = []
+    for name, color in zip(names, colors):
+        points = BroadcastablePoints(
+                    None,
+                    #               t, c, z
+                    broadcast_dims=broadcast_dims,
+                    ndim=ndim,
+                    name=name,
+                    size=size,
+                    face_color=color,
+                    border_color="#5500ffff",
+                )
+        viewer.add_layer(points)
+        sources.append(PointsLayerSource(points, name=name, transformer=point_transformer))
+    return sources
+
+def filter_mean(spec, f=2):
+    mean_spec = np.mean(spec, axis=0)
+    std_spec = np.std(spec, axis=0)
+    
+    # Create a mask for values within 3 standard deviations
+    mask = (spec >= (mean_spec - f * std_spec)) & (spec <= (mean_spec + f * std_spec))
+    
+    # Compute the mean while ignoring values outside 3 std
+    filtered_mean_spec = np.sum(spec * mask, axis=0) / np.sum(mask, axis=0)
+    return filtered_mean_spec
+
+def set_up_new_seq(main_window, point_transformer, engine, seq=None, total_exposure=1000, batch=False, z_plan='all'):
+    """
+    Configures a new Raman sequence with updated metadata and exposure settings.
+
+    Parameters:
+    -----------
+    main_window : object
+        The main Napari window instance used to retrieve the sequence.
+    point_transformer : object
+        An object that provides the `multiplier` attribute for adjusting exposure time.
+    engine : object
+        The engine controlling Raman measurements, which stores default exposure settings.
+    total_exposure : int, optional (default=1000)
+        The total exposure time in milliseconds (ms) for Raman acquisition.
+    batch : bool, optional (default=False)
+        If False, the exposure time is divided by `point_transformer.multiplier`.
+        If True, `total_exposure` is used directly without modification.
+    z_plan : str, optional (default='all')
+        Determines which Z positions to acquire Raman spectra from:
+        - `'all'`: Acquire Raman data at all Z positions.
+        - `'middle'`: Acquire Raman data only at the middle Z position.
+        - Any other value raises a `ValueError`.
+
+    Returns:
+    --------
+    new_seq : object
+        A modified sequence object with updated metadata specifying the Raman acquisition plan.
+    """
+
+    if not batch:
+        engine.default_rm_exposure = total_exposure / point_transformer.multiplier
+    else:
+        engine.default_rm_exposure = total_exposure
+    
+    if engine.default_rm_exposure < 73.8:
+        raise ValueError('Minimal exposure time per Raman collection is 0.0738s')
+    
+    if seq is None:
+        seq = get_seq_from_napari(main_window)
+    new_meta = dict(seq.metadata)
+    num_z = seq.z_plan.num_positions()
+    # add in raman metadata to do raman
+    if z_plan == 'all':
+        new_meta["raman"] = {"z": np.arange(num_z).tolist()} # do all Zs
+    elif z_plan == 'middle':
+        new_meta["raman"] = {"z": [num_z//2]} # only do the middle Z
+    else:
+        raise ValueError('Please choose a valid z_plan: middle or all')
+    new_seq = seq.replace(metadata=new_meta)
+    return new_seq
+
+def find_clear_center_point(mask, threshold=20):
+    background = mask == 0
+    dist_map = distance_transform_edt(background)
+    center = np.array(mask.shape) / 2
+    valid_points = np.argwhere(dist_map >= threshold)
+
+    if len(valid_points) == 0:
+        raise ValueError("No point found that meets the threshold distance.")
+        
+    dists_to_center = np.linalg.norm(valid_points - center, axis=1)
+    best_idx = np.argmin(dists_to_center)
+
+    return np.array(valid_points[best_idx])
+
+# def get_n_most_centered_coms(label_mask, N=10, autofocus_object='glass', bkd_threshold=50):
+#     labels = np.unique(label_mask)
+#     labels = labels[labels != 0]  # ignore background
+#     image_center = np.array(label_mask.shape) / 2
+
+#     coms = []
+#     dists = []
+#     for label in labels:
+#         com = center_of_mass(np.ones_like(label_mask), labels=label_mask, index=label)
+#         com = np.array(com)
+#         dist = np.linalg.norm(com - image_center)
+#         coms.append(com)
+#         dists.append(dist)
+
+#     sorted_coms = [com for _, com in sorted(zip(dists, coms), key=lambda x: x[0])]
+#     if autofocus_object == 'glass':
+#         sorted_coms.insert(0, find_clear_center_point(label_mask, threshold=bkd_threshold))
+
+#     return np.array(sorted_coms[:N])
+
+
+def get_n_most_centered_coms(
+    label_mask,
+    N=10,
+    center=None,
+    radius=250,
+    autofocus_object='glass',
+    bkd_threshold=50
+):
+    """
+    Returns up to N center-of-mass points closest to a given center, 
+    within a distance threshold.
+
+    Parameters:
+    -----------
+    label_mask : 2D array
+        Labeled mask image.
+    N : int
+        Number of points to return.
+    center : tuple or None
+        (y, x) center to compare distances. Defaults to [1024, 1340].
+    threshold : float
+        Max distance from center to include a point.
+    autofocus_object : str
+        If 'glass', adds clear point at index 0.
+    bkd_threshold : int
+        Passed to find_clear_center_point.
+
+    Returns:
+    --------
+    np.ndarray of shape (<=N, 2): list of center-of-mass coordinates
+    """
+    labels = np.unique(label_mask)
+    labels = labels[labels != 0]  # ignore background
+
+    if center is None:
+        center = np.array([672, 512])
+    else:
+        center = np.array(center)
+
+    coms = []
+    dists = []
+
+    for label in labels:
+        com = center_of_mass(np.ones_like(label_mask), labels=label_mask, index=label)
+        com = np.array(com)
+        dist = np.linalg.norm(com - center)
+        if dist <= radius:
+            coms.append(com)
+            dists.append(dist)
+
+    # Sort by distance to center
+    sorted_coms = [com for _, com in sorted(zip(dists, coms), key=lambda x: x[0])]
+
+    # Optionally insert autofocus point
+    if autofocus_object in ['glass', 'quartz', 'laser', 'software']:
+        clear_com = find_clear_center_point(label_mask, threshold=bkd_threshold)
+        sorted_coms.insert(0, clear_com)
+    # elif autofocus_object == 'cell':
+    #     sorted_coms.insert(0, sorted_coms[0])
+        
+    return np.array(sorted_coms[:N])
+
+
+def automated_point_selections(core, viewer, main_window, point_transformer, N, center=None, radius=250, autofocus_object='glass', bkd_thres=50, batch=True):
+    seq = get_seq_from_napari(main_window)
+    images = []
+    masks = []
+    points = []
+    for i in tqdm(range(len(seq.stage_positions))):
+        core.setXYPosition(seq.stage_positions[i].x, seq.stage_positions[i].y)
+        core.waitForSystem()
+        time.sleep(5)
+        core.snapImage()
+        core.waitForSystem()
+        image = core.getImage()
+        core.waitForSystem()
+        time.sleep(1)
+        images.append(image)
+        mask = segment_single_img(image, scale=1)
+        masks.append(mask)
+        points.append(get_n_most_centered_coms(mask, N=N, center=center, radius=radius, autofocus_object=autofocus_object, bkd_threshold=bkd_thres))
+    images = np.array(images)
+    masks = np.array(masks)
+    # points = np.array(points)
+
+    repeats = [len(point)-1 for point in points]
+    repeated_positions = [pos for pos, n in zip(seq.stage_positions, repeats) for _ in range(n)]
+    new_seq = seq.replace(stage_positions = repeated_positions)
+    if batch:
+        core.run_mda(new_seq)
+        sources = create_point_sources(viewer, point_transformer, size=15)
+        expanded_indices = [i for i, n in enumerate(repeats) for _ in range(n)]
+        for p in range(len(repeated_positions)):
+            sources[1]._points.add([0,p,0,0,points[expanded_indices[p]][0,0], points[expanded_indices[p]][0,1]])
+            # pt = np.vstack(points[:, 1:, :])[p]
+            pt = np.vstack([arr[1:, :] for arr in points])[p]
+            sources[0]._points.add([0,p,0,0, pt[0], pt[1]])
+        return sources, np.cumsum([0] + repeats[:-1]), new_seq
+    else:
+        core.run_mda(seq)
+        sources = create_point_sources(viewer, point_transformer, size=15)
+        for p in range(len(seq.stage_positions)):
+            sources[1]._points.add([0,p,0,0,points[p][0,0], points[p][0,1]])
+            for pt in points[p][1:, :]:
+                sources[0]._points.add([0,p,0,0, pt[0], pt[1]])
+        return sources, np.arange(len(seq.stage_positions)), seq
+    
+
+def unload(core, N=20):
+    n = 0.1  # starting sleep time
+    for attempt in range(N):
+        if attempt == N-1:
+            print('reach reloading maxiter')
+        try:
+            time.sleep(n)
+            try:
+                core.events.channelGroupChanged.disconnect()
+            except Exception as e:
+                None
+            try:
+                core.events.configGroupChanged.disconnect()
+            except Exception as e:
+                None
+            try:
+                core.events.propertyChanged.disconnect()
+            except Exception as e:
+                None   
+            try:
+                core.events.systemConfigurationLoaded.disconnect()
+            except Exception as e:
+                None   
+            try:
+                core.events.configSet.disconnect()
+            except Exception as e:
+                None
+
+            core.unloadAllDevices()
+            core.waitForSystem()
+            return  # success!
+        except Exception as e:
+            n += 1  # increase wait time and retry  
+
