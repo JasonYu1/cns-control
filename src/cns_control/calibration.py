@@ -140,26 +140,31 @@ class Calibrator:
         self.core.setConfig("Channel", "RM")
         self.core.setShutterOpen("Fluoshutter", True)
 
+        width = self.core.getImageWidth()
+        height = self.core.getImageHeight()
+
         grid = SimpleGridSource(N, N)
         rel_BF = grid.get_current_points()
 
         volts = self.transformer.BF_to_volts(
-            (rel_BF * [1344, 1024])[:, ::-1] / [1024, 1344], max_volts=self.max_volts
+            (rel_BF * [width, height])[:, ::-1] / [height, width], max_volts=self.max_volts
         )
 
         self.core.stopSequenceAcquisition()
         self.core.setExposure(1)
 
-        ds = self.collect_calibration_images(volts, relative_pos=rel_BF*np.array([1344, 1024])[None, :], thres=thres)
+        ds = self.collect_calibration_images(
+            volts,
+            relative_pos=rel_BF * np.array([width, height])[None, :],
+            thres=thres,
+        )
 
         self.core.setShutterOpen("Fluoshutter", False)
 
         if plot:
             plt.figure()
             plt.imshow(ds["imgs"].max(axis=0))  # Max projection of images
-            # pix_BF = rel_BF * np.array([1024, 1344])[None, :]
-            # plt.scatter(pix_BF[:, 1], pix_BF[:, 0], color="r")  # Plot calibration points
-            pix_BF = rel_BF * np.array([1344, 1024])[None, :]
+            pix_BF = rel_BF * np.array([width, height])[None, :]
             plt.scatter(pix_BF[:, 0], pix_BF[:, 1], color="r")  # Plot calibration points
 
         return ds
