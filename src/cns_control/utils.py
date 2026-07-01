@@ -13,6 +13,16 @@ from scipy.ndimage import distance_transform_edt
 import numpy as np
 from skimage.draw import disk
 
+
+# Values that mean "do not use an autofocus object / layer".
+_NO_AUTOFOCUS = (None, "None", "none", "")
+
+
+def _is_no_autofocus(autofocus_object) -> bool:
+    """True when the caller has asked for no autofocus object."""
+    return autofocus_object in _NO_AUTOFOCUS
+
+
 def add_mask_with_hole(
     viewer,
     image_size,
@@ -96,9 +106,9 @@ def create_point_sources(viewer,
     size : float, optional
         Size of the points in pixels (default: 35).
     names : list of str, optional
-        Names of the point source layers (default: ['cells', 'bkd', 'beads']).
+        Names of the point source layers (default: ['cells', 'autofocus']).
     colors : list of str, optional
-        List of colors for the point sources, specified in hex format (default: ['#aa0000ff', '#2d1f7f', 'springgreen']).
+        List of colors for the point sources, specified in hex format.
 
     Returns:
     --------
@@ -230,6 +240,11 @@ def get_n_most_centered_coms(
     Returns up to N center-of-mass points closest to a given center, 
     within a distance threshold.
 
+    When `autofocus_object` is one of the focus targets, a clear-background
+    point is inserted at index 0 (used for autofocus). When it is None / "None"
+    (or 'cell'), NO autofocus point is prepended -- every returned point is a
+    cell center-of-mass.
+
     Parameters:
     -----------
     label_mask : 2D array
@@ -237,11 +252,12 @@ def get_n_most_centered_coms(
     N : int
         Number of points to return.
     center : tuple or None
-        (y, x) center to compare distances. Defaults to [1024, 1340].
-    threshold : float
+        (y, x) center to compare distances. Defaults to [672, 512].
+    radius : float
         Max distance from center to include a point.
-    autofocus_object : str
-        If 'glass', adds clear point at index 0.
+    autofocus_object : str or None
+        If a focus target ('glass', 'quartz', 'laser', 'software'), adds a clear
+        point at index 0. If None / "None", no autofocus point is added.
     bkd_threshold : int
         Passed to find_clear_center_point.
 
@@ -271,17 +287,22 @@ def get_n_most_centered_coms(
     # Sort by distance to center
     sorted_coms = [com for _, com in sorted(zip(dists, coms), key=lambda x: x[0])]
 
-    # Optionally insert autofocus point
+    # Optionally insert autofocus point (skipped entirely when no autofocus).
     if autofocus_object in ['glass', 'quartz', 'laser', 'software']:
         clear_com = find_clear_center_point(label_mask, threshold=bkd_threshold)
         sorted_coms.insert(0, clear_com)
     # elif autofocus_object == 'cell':
     #     sorted_coms.insert(0, sorted_coms[0])
-        
+
     return np.array(sorted_coms[:N])
 
 
 def automated_point_selections(core, viewer, main_window, point_transformer, N, center=None, radius=250, autofocus_object='glass', bkd_thres=50, batch=True):
+    # When there is no autofocus object, get_n_most_centered_coms does NOT
+    # prepend a clear-background point, so every returned point is a cell.
+    # In that case we also skip creating the 'autofocus' point layer.
+    no_autofocus = _is_no_autofocus(autofocus_object)
+
     seq = get_seq_from_napari(main_window)
     images = []
     masks = []
@@ -303,26 +324,49 @@ def automated_point_selections(core, viewer, main_window, point_transformer, N, 
     masks = np.array(masks)
     # points = np.array(points)
 
-    repeats = [len(point)-1 for point in points]
+    # With autofocus: row 0 of each points[i] is the autofocus point, rows 1: are cells.
+    # Without autofocus: every row is a cell.
+    if no_autofocus:
+        cell_slice = slice(0, None)
+        repeats = [len(point) for point in points]
+    else:
+        cell_slice = slice(1, None)
+        repeats = [len(point) - 1 for point in points]
+
     repeated_positions = [pos for pos, n in zip(seq.stage_positions, repeats) for _ in range(n)]
     new_seq = seq.replace(stage_positions = repeated_positions)
+
+    # Only build the autofocus layer if we actually have an autofocus object.
+    if no_autofocus:
+        sources = create_point_sources(
+            viewer, point_transformer, size=15,
+            names=['cells'], colors=['#aa0000ff'],
+        )
+    else:
+        sources = create_point_sources(viewer, point_transformer, size=15)
+
     if batch:
         core.run_mda(new_seq)
-        sources = create_point_sources(viewer, point_transformer, size=15)
         expanded_indices = [i for i, n in enumerate(repeats) for _ in range(n)]
+        # all cell points across every FOV, in expanded order
+        all_cells = np.vstack([arr[cell_slice, :] for arr in points])
         for p in range(len(repeated_positions)):
-            sources[1]._points.add([0,p,0,0,points[expanded_indices[p]][0,0], points[expanded_indices[p]][0,1]])
-            # pt = np.vstack(points[:, 1:, :])[p]
-            pt = np.vstack([arr[1:, :] for arr in points])[p]
-            sources[0]._points.add([0,p,0,0, pt[0], pt[1]])
+            if not no_autofocus:
+                sources[1]._points.add(
+                    [0, p, 0, 0,
+                     points[expanded_indices[p]][0, 0],
+                     points[expanded_indices[p]][0, 1]]
+                )
+            pt = all_cells[p]
+            sources[0]._points.add([0, p, 0, 0, pt[0], pt[1]])
         return sources, np.cumsum([0] + repeats[:-1]), new_seq
     else:
         core.run_mda(seq)
-        sources = create_point_sources(viewer, point_transformer, size=15)
         for p in range(len(seq.stage_positions)):
-            sources[1]._points.add([0,p,0,0,points[p][0,0], points[p][0,1]])
-            for pt in points[p][1:, :]:
-                sources[0]._points.add([0,p,0,0, pt[0], pt[1]])
+            if not no_autofocus:
+                sources[1]._points.add([0, p, 0, 0, points[p][0, 0], points[p][0, 1]])
+            for pt in points[p][cell_slice, :]:
+                sources[0]._points.add([0, p, 0, 0, pt[0], pt[1]])
         return sources, np.arange(len(seq.stage_positions)), seq
     
 
@@ -358,5 +402,4 @@ def unload(core, N=20):
             core.waitForSystem()
             return  # success!
         except Exception as e:
-            n += 1  # increase wait time and retry  
-
+            n += 1  # increase wait time and retry
