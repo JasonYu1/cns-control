@@ -374,7 +374,12 @@ class ManualImageSelector:
         elif event.key.lower() == 'n':  # Mark as NaN
             self.manual_selections[self.current_idx] = True
             self.selected_points[self.current_idx] = (np.nan, np.nan)
-            self.show_image()
+            if self.current_idx < self.num_images - 1:
+                self.current_idx += 1
+                self.show_image()
+            else:
+                print("Finished selection.")
+                plt.close()
 
     def start(self):
         plt.show()
