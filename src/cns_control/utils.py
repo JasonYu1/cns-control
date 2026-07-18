@@ -489,6 +489,8 @@ def automated_point_selections(
             for _ in range(n_cells_here):
                 if not no_autofocus:
                     sources[1]._points.add([0, p, 0, 0, autofocus_yx[0], autofocus_yx[1]])
+                # 2 repeated points at center (DAQ needs >= 2 samples per channel)
+                sources[0]._points.add([0, p, 0, 0, img_center_yx[0], img_center_yx[1]])
                 sources[0]._points.add([0, p, 0, 0, img_center_yx[0], img_center_yx[1]])
                 p += 1
 
