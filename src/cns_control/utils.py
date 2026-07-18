@@ -491,7 +491,8 @@ def automated_point_selections(
                     sources[1]._points.add([0, p, 0, 0, autofocus_yx[0], autofocus_yx[1]])
                 # 2 repeated points at center (DAQ needs >= 2 samples per channel)
                 sources[0]._points.add([0, p, 0, 0, img_center_yx[0], img_center_yx[1]])
-                sources[0]._points.add([0, p, 0, 0, img_center_yx[0], img_center_yx[1]])
+                if point_transformer.multiplier <= 1:
+                    sources[0]._points.add([0, p, 0, 0, img_center_yx[0], img_center_yx[1]])
                 p += 1
 
         return sources, np.arange(len(new_positions)), new_seq
