@@ -345,7 +345,7 @@ def get_n_most_centered_coms(
 def automated_point_selections(
     core, viewer, main_window, point_transformer, N,
     center=None, radius=250, autofocus_object='glass', bkd_thres=50, batch=True,
-    center_cell=False, vandermonde_model_path=None,
+    center_cell=False, vandermonde_model_path=None, cellpose_model='cyto2'
 ):
     """
     Parameters
@@ -412,7 +412,7 @@ def automated_point_selections(
         core.waitForSystem()
         time.sleep(1)
         images.append(image)
-        mask = segment_single_img(image, scale=1)
+        mask = segment_single_img(image, scale=1, cellpose_model=cellpose_model)
         masks.append(mask)
 
         if center_cell:
